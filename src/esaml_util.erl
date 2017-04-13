@@ -19,6 +19,7 @@
 -export([build_nsinfo/2]).
 -export([load_private_key/1, load_certificate_chain/1, load_certificate/1, load_metadata/2, load_metadata/1]).
 -export([convert_fingerprints/1]).
+-export([unique_id/0]).
 
 %% @doc Converts various ascii hex/base64 fingerprint formats to binary
 -spec convert_fingerprints([string() | binary()]) -> [binary()].
@@ -139,8 +140,10 @@ load_private_key(Path) ->
             {ok, KeyFile} = file:read_file(Path),
             [KeyEntry] = public_key:pem_decode(KeyFile),
             Key = case public_key:pem_entry_decode(KeyEntry) of
-                #'PrivateKeyInfo'{privateKey = KeyData} ->
+                #'PrivateKeyInfo'{privateKey = KeyData} when is_list(KeyData) ->
                     public_key:der_decode('RSAPrivateKey', list_to_binary(KeyData));
+                #'PrivateKeyInfo'{privateKey = KeyData} when is_binary(KeyData) ->
+                    public_key:der_decode('RSAPrivateKey', KeyData);
                 Other -> Other
             end,
             ets:insert(esaml_privkey_cache, {Path, Key}),
@@ -240,6 +243,26 @@ check_dupe_ets(A, Digest) ->
                 end, []])
             end, []]),
             ok
+    end.
+
+%% @doc Returns a unique xsd:ID string suitable for SAML use.
+-spec unique_id() -> string().
+unique_id() ->
+    <<R:64>> = crypto:rand_bytes(8),
+    T = try
+        erlang:system_time() % needs ERTS-7.0
+    catch
+        error:undef ->
+            {Mega, Sec, Micro} = timestamp(),
+            Mega * 1000000 * 1000000 + Sec * 1000000 + Micro
+    end,
+    lists:flatten(io_lib:format("_~.16b~.16b", [R, T])).
+
+timestamp() ->
+    try
+        erlang:timestamp()
+    catch
+        error:undef -> erlang:now()
     end.
 
 -ifdef(TEST).

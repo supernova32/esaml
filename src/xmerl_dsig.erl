@@ -22,6 +22,8 @@
 
 -export([verify/1, verify/2, sign/3, strip/1, digest/1]).
 
+-export_type([sig_method/0]).
+
 -include_lib("xmerl/include/xmerl.hrl").
 -include_lib("public_key/include/public_key.hrl").
 
@@ -38,9 +40,13 @@ strip(#xmlDocument{content = Kids} = Doc) ->
 
 strip(#xmlElement{content = Kids} = Elem) ->
     NewKids = lists:filter(fun(Kid) ->
-        case xmerl_c14n:canon_name(Kid) of
-            "http://www.w3.org/2000/09/xmldsig#Signature" -> false;
-            _Name -> true
+        case Kid of
+            #xmlElement{} ->
+                case xmerl_c14n:canon_name(Kid) of
+                    "http://www.w3.org/2000/09/xmldsig#Signature" -> false;
+                    _Name -> true
+                end;
+            _ -> true
         end
     end, Kids),
     Elem#xmlElement{content = NewKids}.
@@ -53,7 +59,7 @@ strip(#xmlElement{content = Kids} = Elem) ->
 sign(ElementIn, PrivateKey = #'RSAPrivateKey'{}, CertBin) when is_binary(CertBin) ->
     sign(ElementIn, PrivateKey, CertBin, "http://www.w3.org/2000/09/xmldsig#rsa-sha1").
 
--spec sign(Element :: #xmlElement{}, PrivateKey :: #'RSAPrivateKey'{}, CertBin :: binary(), SignatureMethod :: sig_method() | sig_method_uri()) -> #xmlElement{}.
+-spec sign(Element :: #xmlElement{}, PrivateKey :: #'RSAPrivateKey'{}, CertBin :: binary(), SignatureMethod :: sig_method() | sig_method_uri() | undefined) -> #xmlElement{}.
 sign(ElementIn, PrivateKey = #'RSAPrivateKey'{}, CertBin, SigMethod) when is_binary(CertBin) ->
     % get rid of any previous signature
     ElementStrip = strip(ElementIn),
@@ -65,7 +71,7 @@ sign(ElementIn, PrivateKey = #'RSAPrivateKey'{}, CertBin, SigMethod) when is_bin
             case lists:keyfind('id', 2, ElementStrip#xmlElement.attributes) of
                 #xmlAttribute{value = LowId} -> {ElementStrip, LowId};
                 _ ->
-                    NewId = uuid:to_string(uuid:uuid1()),
+                    NewId = esaml_util:unique_id(),
                     Attr = #xmlAttribute{name = 'ID', value = NewId, namespace = #xmlNamespace{}},
                     NewAttrs = [Attr | ElementStrip#xmlElement.attributes],
                     Elem = ElementStrip#xmlElement{attributes = NewAttrs},
@@ -132,7 +138,7 @@ sign(ElementIn, PrivateKey = #'RSAPrivateKey'{}, CertBin, SigMethod) when is_bin
 %% Strips any XML digital signatures and applies any relevant InclusiveNamespaces
 %% before generating the digest.
 -spec digest(Element :: #xmlElement{}) -> binary().
-digest(Element) -> digest(Element, sha).
+digest(Element) -> digest(Element, sha256).
 
 -spec digest(Element :: #xmlElement{}, HashFunction :: sha | sha256) -> binary().
 digest(Element, HashFunction) ->
@@ -201,7 +207,10 @@ verify(Element, Fingerprints) ->
         CertHash2 = crypto:hash(sha256, CertBin),
 
         Cert = public_key:pkix_decode_cert(CertBin, plain),
-        {_, KeyBin} = Cert#'Certificate'.tbsCertificate#'TBSCertificate'.subjectPublicKeyInfo#'SubjectPublicKeyInfo'.subjectPublicKey,
+        KeyBin = case Cert#'Certificate'.tbsCertificate#'TBSCertificate'.subjectPublicKeyInfo#'SubjectPublicKeyInfo'.subjectPublicKey of
+            {_, KeyBin2} -> KeyBin2; % Public_Key 0.23
+            KeyBin2 -> KeyBin2 % Public_Key 1.0, i.e. Erlang/OTP 18
+        end,
         Key = public_key:pem_entry_decode({'RSAPublicKey', KeyBin, not_encrypted}),
 
         case public_key:verify(Data, HashFunction, Sig, Key) of
@@ -232,6 +241,8 @@ verify(Element) ->
 
 -spec signature_props(atom() | string()) -> {HashFunction :: atom(), DigestMethodUrl :: string(), SignatureMethodUrl :: string()}.
 signature_props("http://www.w3.org/2000/09/xmldsig#rsa-sha1") ->
+    signature_props(rsa_sha1);
+signature_props(undefined) ->
     signature_props(rsa_sha1);
 signature_props(rsa_sha1) ->
     HashFunction = sha,
